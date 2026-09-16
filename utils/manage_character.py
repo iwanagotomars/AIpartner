@@ -74,14 +74,14 @@ class CharacterRuntime:
     @property
     def true_character_name(self) -> str:
         """返回面向用户和大模型显示的角色名称。"""
-        name = self.character_config.get("true_character_name", "")
+        name = self.character_config["character"].get("true_character_name", "")
         if isinstance(name, str) and name.strip():
             return name.strip()
         return self.character_name
 
     @property
     def scene_mode(self) -> str:
-        return self.character_config.get("scene_mode", "realtime")
+        return self.character_config["character"].get("scene_mode", "realtime")
 
 
 class CharacterManager:
@@ -239,7 +239,7 @@ class CharacterManager:
                 display_service = CharacterDisplayService(
                     project_root=self.project_root,
                     character_name=initialized_name,
-                    true_character_name=character_config["true_character_name"]
+                    true_character_name=character_config["character"]["true_character_name"]
                 )
             except Exception as error:
                 display_errors.append(
@@ -252,7 +252,7 @@ class CharacterManager:
             display_state = CharacterDisplayState()
             configurable["display_state"] = display_state
             history_store = ChatHistoryStore(
-                get_memory_root(character.directory, character_config["scene_mode"])
+                get_memory_root(character.directory, character_config["character"]["scene_mode"])
             )
             configurable["history_store"] = history_store
 

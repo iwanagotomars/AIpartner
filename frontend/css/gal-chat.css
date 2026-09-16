@@ -441,6 +441,16 @@ body[data-chat-mode="gal_chat"] .history-event--tool .history-content {
   background: var(--theme-gal-history-content);
 }
 
+/* 旮旯历史按阅读顺序靠左，预览稍小，沿用面板的用户消息底色。 */
+body[data-chat-mode="gal_chat"] .history-images {
+  --history-image-size: 224px;
+  align-items: flex-start;
+}
+body[data-chat-mode="gal_chat"] .history-image-frame {
+  background: var(--theme-gal-user-bubble);
+  border-radius: 0.3rem;
+}
+
 body[data-chat-mode="gal_chat"] .history-close-button {
   position: absolute;
   top: 0.6rem;

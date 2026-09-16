@@ -10,6 +10,8 @@ zai-sdk==0.2.3
 fastapi==0.141.1
 uvicorn[standard]==0.52.2
 pydantic==2.13.4
+Pillow==12.3.0
+tomlkit==0.14.0
 langchain-core==1.5.4
 numpy==2.5.2
 soundfile==0.14.0
@@ -19,4 +21,3 @@ huggingface-hub==0.36.2
 torchaudio
 python-dotenv==1.2.2
 requests==2.34.2
-

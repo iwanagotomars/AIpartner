@@ -10,7 +10,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, Field
 
 from utils.manage_character import (
     CharacterManager,
@@ -58,7 +58,13 @@ from utils.character_groups import (
 )
 from utils.character_setting import read_character_setting
 
+from utils.vision import (
+    MAX_CHAT_IMAGES, MAX_IMAGE_BYTES, ChatUploadLimit, prepare_chat_images,
+    vision_unavailable_reason, split_image_description_with_reply,
+)
+
 app = FastAPI()
+app.add_middleware(ChatUploadLimit)
 
 BASE_DIR = Path(__file__).resolve().parent
 WAV_DIR = BASE_DIR / "wavs"
@@ -78,10 +84,15 @@ last_tts_generated: Path | None = None
 last_tts_generated_lock = Lock()
 
 
+class ChatImage(BaseModel):
+    data_url: str
+
+
 # chat函数的输入格式
 class ChatRequest(BaseModel):
     message: str
     runtime_id: str
+    images: list[ChatImage] = Field(default_factory=list)
 
 
 # chat函数的输出格式
@@ -93,6 +104,7 @@ class ChatResponse(BaseModel):
     voice_available: bool
     display_enabled: bool
     portrait_url: str | None = None
+    image_description: str | None = None
 
 
 # chat_status函数的输出格式
@@ -129,6 +141,10 @@ class DisplayBootstrapResponse(BaseModel):
 
     display_enabled: bool
     default_portrait_url: str | None
+    vision_enabled: bool = False
+    vision_unavailable_reason: str | None = None
+    max_chat_images: int = MAX_CHAT_IMAGES
+    max_image_bytes: int = MAX_IMAGE_BYTES
 
 
 class ChatThemeRequest(BaseModel):
@@ -443,10 +459,11 @@ def run_memory_consolidation(
         runtime.conversation_state = final_state
 
 
-def _natural_display_text(runtime: CharacterRuntime, content: str) -> str:
-    if runtime.display_service is None:
-        return content.strip()
-    return runtime.display_service.parser_get_natural_text(content).strip()
+def _natural_display_text(runtime: CharacterRuntime, content: str) -> tuple[str, str]:
+    description, reply = split_image_description_with_reply(content)
+    if runtime.display_service is not None:
+        reply = runtime.display_service.parser_get_natural_text(reply)
+    return description, reply.strip()
 
 
 def _append_text_only_display(
@@ -456,6 +473,9 @@ def _append_text_only_display(
     error: str | None = None,
 ) -> None:
     """演出关闭或单条处理失败时仍向前端交付文本。"""
+    _, natural_reply = _natural_display_text(runtime, source["content"])
+    if not natural_reply:
+        return
     display_id = uuid4().hex
     portrait_url = (
         runtime.display_service.default_portrait_url
@@ -469,10 +489,7 @@ def _append_text_only_display(
             "turn_id": turn_id,
             "type": "display",
             "source_type": source["type"],
-            "content_split": _natural_display_text(
-                runtime,
-                source["content"],
-            ),
+            "content_split": natural_reply,
             "portrait_url": portrait_url,
             "audio_url": None,
             "error": error,
@@ -636,15 +653,15 @@ def list_characters():
         characters.append(
             CharacterSummary(
                 name=character.name,
-                display_name=config["true_character_name"],
+                display_name=config["character"]["true_character_name"],
                 profile_url=(
                     f"/api/characters/{quote(character.name, safe='')}/profile"
                     if character.profile_path is not None
                     else None
                 ),
-                favour=config["favour"],
-                group=config["group"],
-                scene_mode=config["scene_mode"],
+                favour=config["frontend"]["favour"],
+                group=config["frontend"]["group"],
+                scene_mode=config["character"]["scene_mode"],
             )
         )
 
@@ -717,7 +734,7 @@ def get_referenced_character_groups() -> list[str]:
     """按系统角色顺序收集当前非空自定义分组。"""
     groups = []
     for character in character_manager.list_characters():
-        group = character_manager.load_character_config(character.name)["group"]
+        group = character_manager.load_character_config(character.name)["frontend"]["group"]
         if group and group not in groups:
             groups.append(group)
     return groups
@@ -778,7 +795,7 @@ def delete_character_group(request: CharacterGroupRequest):
         )
         for character in character_manager.list_characters():
             config = character_manager.load_character_config(character.name)
-            if config["group"] == group:
+            if config["frontend"]["group"] == group:
                 members.append(character)
         if not members:
             raise ValueError(f"分组 '{group}' 不存在")
@@ -827,8 +844,8 @@ def update_character_group(
             detail="角色分组保存失败，原有配置未被修改。",
         ) from error
     return CharacterGroupResponse(
-        favour=config["favour"],
-        group=config["group"],
+        favour=config["frontend"]["favour"],
+        group=config["frontend"]["group"],
     )
 
 
@@ -1157,6 +1174,21 @@ def get_ready_history_event(
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 
+@app.get("/api/characters/{requested_character}/history/images/{filename}")
+def get_history_image(requested_character: str, filename: str, runtime_id: str):
+    """沿用当前运行环境的历史目录，隔离普通与沙盒记忆。"""
+    runtime = require_runtime(requested_character, runtime_id)
+    if runtime.history_store is None:
+        raise HTTPException(status_code=404, detail="历史图片不存在。")
+    try:
+        path = runtime.history_store.image_path(filename)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="历史图片不存在。") from error
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="历史图片不存在。")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
 @app.get(
     "/api/characters/{requested_character}/displays/{display_id}"
 )
@@ -1189,7 +1221,7 @@ def read_chat_theme(requested_character: str, runtime_id: str):
     runtime = require_runtime(requested_character, runtime_id)
     return ChatThemeResponse(
         chat_theme=normalize_chat_theme(
-            runtime.character_config.get("chat_theme", DEFAULT_CHAT_THEME)
+            runtime.character_config["frontend"].get("chat_theme", DEFAULT_CHAT_THEME)
         )
     )
 
@@ -1218,7 +1250,7 @@ def update_chat_theme(
             detail="聊天主题保存失败，原有配置未被修改。",
         ) from error
 
-    runtime.character_config["chat_theme"] = request.chat_theme
+    runtime.character_config["frontend"]["chat_theme"] = request.chat_theme
     return ChatThemeResponse(chat_theme=request.chat_theme)
 
 
@@ -1230,7 +1262,10 @@ def read_display_bootstrap(requested_character: str, runtime_id: str):
     """返回旮旯模式初始化信息，不修改运行状态或演出队列。"""
     runtime = require_runtime(requested_character, runtime_id)
     display_service = runtime.display_service
+    reason = vision_unavailable_reason(runtime.character_config)
     return DisplayBootstrapResponse(
+        vision_enabled=reason is None,
+        vision_unavailable_reason=reason,
         display_enabled=runtime.display_enabled,
         default_portrait_url=(
             display_service.default_portrait_url
@@ -1290,7 +1325,10 @@ def chat(
     runtime = require_runtime(requested_character, request.runtime_id)
     user_text = request.message.strip()
 
-    if not user_text:
+    has_images = bool(request.images)
+    if has_images and (reason := vision_unavailable_reason(runtime.character_config)):
+        raise HTTPException(status_code=400, detail=reason)
+    if not user_text and not has_images:
         raise HTTPException(
             status_code=400,
             detail="输入内容不能为空。"
@@ -1304,6 +1342,7 @@ def chat(
     except GenerationBusyError as error:
         raise generation_busy_response(error) from error
 
+    vision_turn = None
     handed_to_background = False
     turn_started = False
     history_started = False
@@ -1349,6 +1388,14 @@ def chat(
                     },
                 )
 
+            if has_images:
+                try:
+                    images = prepare_chat_images([item.data_url for item in request.images[:MAX_CHAT_IMAGES]])
+                except ValueError as error:
+                    raise HTTPException(status_code=400, detail=str(error)) from error
+                user_text = (user_text + "\n" if user_text else "") + f"[用户发送了{len(images)}张图片]"
+                vision_turn = {"images": images, "description": "", "description_published": False}
+
             if history_store is not None:
                 try:
                     history_store.start_turn(
@@ -1356,6 +1403,7 @@ def chat(
                         user_text=user_text,
                         speaker="User",
                         created_at=started_at,
+                        image_data_urls=[item.data_url for item in request.images[:MAX_CHAT_IMAGES]],
                     )
                     history_started = True
                 except Exception as error:
@@ -1366,6 +1414,7 @@ def chat(
                     )
                     history_store = None
 
+            request.images.clear()  # 存档完成后释放原图；Base64 不进入历史 JSON。
             prepare_character_audio_directory(runtime.character_name)
             input_state = build_input_state(user_text, runtime)
 
@@ -1380,6 +1429,7 @@ def chat(
                 "turn_id": turn_id,
             })
 
+            configurable["vision_turn"] = vision_turn
             runtime.display_state.start_turn(turn_id)
             turn_started = True
             Thread(
@@ -1396,7 +1446,10 @@ def chat(
                 )
 
             raw_reply = get_last_ai_reply(reply_state["messages"])
-            reply = _natural_display_text(runtime, raw_reply)
+            description, reply = _natural_display_text(runtime, raw_reply)
+            image_description = None
+            if vision_turn is not None:
+                image_description = vision_turn["description"] or description
             reply_succeeded = True
 
             # 测试替身或外部 ReplyGraph 可能绕过 agent_node，确保最终回复不丢失。
@@ -1404,13 +1457,18 @@ def chat(
                 runtime.display_state.enqueue_unplanned(
                     turn_id,
                     "reply_directly",
-                    raw_reply,
+                    split_image_description_with_reply(raw_reply)[1],
                 )
                 runtime.display_state.set_final_reply(turn_id, reply)
             runtime.display_state.finish_input(turn_id)
 
             if history_store is not None:
                 try:
+                    if vision_turn is not None and not vision_turn["description_published"]:
+                        history_store.append_event(
+                            turn_id, "vision_description", "assistant", runtime.true_character_name,
+                            image_description or "未提取到独立的图片识别描述，请参考下方回复。", time(),
+                        )
                     history_store.complete_turn(
                         turn_id=turn_id,
                         speaker=runtime.true_character_name,
@@ -1446,6 +1504,7 @@ def chat(
         return ChatResponse(
             session_id=None,
             user_input=user_text,
+            image_description=image_description,
             reply=reply,
             memory_consolidating=True,
             voice_available=(
@@ -1462,6 +1521,10 @@ def chat(
             detail=f"AI 回复生成失败：{error}",
         ) from error
     finally:
+        if vision_turn is not None:
+            vision_turn.pop("images", None)
+        runtime.graph_config.get("configurable", {}).pop("vision_turn", None)
+        request.images.clear()
         if not handed_to_background:
             if history_started and not reply_succeeded:
                 try:

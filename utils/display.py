@@ -1,3 +1,4 @@
+from .vision import split_image_description_with_reply
 from dataclasses import dataclass
 import re
 from pathlib import Path
@@ -605,6 +606,8 @@ class CharacterDisplayService:
         }
 
     def plan(self, ai_reply: str) -> dict[str, list]:
+        # 识图摘要保留在上下文中，只有正式回复参与立绘和语音演出。
+        _, ai_reply = split_image_description_with_reply(ai_reply)
         parsed_reply = self.parse_display_reply(ai_reply)
 
         if isinstance(parsed_reply, list):

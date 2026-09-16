@@ -544,3 +544,97 @@ body[data-chat-mode="text_chat"] #sendButton:disabled {
     max-width: 80%;
   }
 }
+
+/* 附件使用主题变量；折叠仅影响展示，不移除浏览器里的草稿。 */
+.chat-composer { position: relative; }
+.attachment-actions { position: relative; flex: 0 0 auto; z-index: 12; }
+.chat-composer #attachmentButton {
+  display: grid; place-items: center; width: 36px; height: 36px; padding: 0;
+  font-size: 25px; line-height: 1; border-radius: 9px;
+  border: 1px solid var(--theme-border); color: var(--theme-accent);
+  background: var(--theme-soft); cursor: pointer;
+}
+.chat-composer #attachmentButton:not(:disabled):hover,
+.chat-composer #attachmentButton[aria-expanded="true"] {
+  border-color: var(--theme-accent); background: var(--theme-user-bubble);
+}
+.attachment-menu, .attachment-panel {
+  position: absolute; bottom: calc(100% + 8px); left: 0;
+  padding: 10px; border: 1px solid var(--theme-border); border-radius: 10px;
+  background: var(--theme-surface); color: var(--theme-text);
+  box-shadow: 0 4px 16px #0002;
+}
+.attachment-menu { z-index: 12; width: 230px; max-width: calc(100vw - 48px); }
+.chat-composer #addImageButton {
+  width: 100%; text-align: left; padding: 10px 12px; border: 0; border-radius: 7px;
+  background: var(--theme-soft); color: var(--theme-text); cursor: pointer;
+}
+.chat-composer #addImageButton:not(:disabled):hover {
+  color: var(--theme-accent); background: var(--theme-user-bubble);
+}
+.attachment-menu small { display: block; margin: 8px 4px 2px; color: var(--theme-muted); line-height: 1.5; }
+.attachment-panel { width: max-content; max-width: calc(100% - 22px); z-index: 8; }
+.attachment-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
+#imageCount { font-size: 12px; color: var(--theme-muted); }
+.chat-composer #imagePreviewToggle {
+  padding: 4px 7px; border: 0; border-radius: 6px; font: inherit; font-size: 13px;
+  color: var(--theme-accent); background: var(--theme-soft); cursor: pointer;
+}
+.chat-composer #imagePreviewToggle:hover { background: var(--theme-user-bubble); }
+.attachment-panel.is-collapsed { padding: 5px; }
+.attachment-panel.is-collapsed .attachment-panel-heading { margin: 0; }
+.image-previews { display: flex; gap: 8px; overflow-x: auto; padding-top: 4px; }
+.image-preview { position: relative; flex: 0 0 80px; border: 1px solid var(--theme-border); border-radius: 7px; background: var(--theme-soft); overflow: hidden; }
+.image-preview img { width: 80px; height: 80px; object-fit: contain; display: block; }
+.chat-composer .image-preview button {
+  position: absolute; right: 3px; top: 3px; width: 23px; height: 23px; padding: 0;
+  border: 1px solid var(--theme-border); border-radius: 6px; font-size: 17px;
+  color: var(--theme-text); background: var(--theme-surface); cursor: pointer;
+}
+.chat-composer .image-preview button:not(:disabled):hover { color: var(--theme-accent); border-color: var(--theme-accent); }
+.image-preview span { display: block; padding: 3px; text-align: center; font-size: 12px; color: var(--theme-muted); }
+.attachment-actions button:disabled, .image-preview button:disabled { color: var(--theme-muted); cursor: not-allowed; }
+.attachment-actions button:focus-visible, #imagePreviewToggle:focus-visible, .image-preview button:focus-visible {
+  outline: 2px solid var(--theme-accent); outline-offset: 2px;
+}
+.history-event--vision .history-speaker { display: block; }
+
+/* 固定预览占位，图片加载或失效替换不会挤动分页历史的滚动位置。 */
+.history-images {
+  --history-image-size: 256px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 0.5rem;
+}
+.history-image-frame {
+  box-sizing: border-box;
+  width: var(--history-image-size);
+  max-width: 100%;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border: 1px solid var(--theme-border);
+  border-radius: 0.4rem;
+}
+.history-image-frame img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+/* 文本模式的图片随用户气泡靠右，并使用相同的主题底色。 */
+body[data-chat-mode="text_chat"] .history-images {
+  align-items: flex-end;
+}
+body[data-chat-mode="text_chat"] .history-image-frame {
+  background: var(--theme-user-bubble);
+}
+/* 旮旯模式隐藏整条输入区；文本模式常驻输入区，仅隐藏附件浮层。 */
+body[data-chat-mode="gal_chat"][data-send-in-flight="true"] .chat-composer {
+  visibility: hidden !important; pointer-events: none;
+}
+body[data-chat-mode="text_chat"][data-send-in-flight="true"] .attachment-panel,
+body[data-chat-mode="text_chat"][data-send-in-flight="true"] .attachment-menu {
+  visibility: hidden; pointer-events: none;
+}
+.attachment-menu[hidden], .attachment-panel[hidden], .image-previews[hidden], #imageCount[hidden] { display: none; }

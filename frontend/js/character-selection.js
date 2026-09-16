@@ -230,7 +230,7 @@ function createSceneModeBadge(sceneMode) {
   badge.dataset.sceneMode = sceneMode;
   badge.textContent = mode.label;
   badge.title = `当前为${mode.name}模式。\n${mode.description}\n` +
-    "如需切换，请先关闭程序，修改角色配置文件中的 scene_mode，" +
+    "如需切换，请先关闭程序，修改角色配置文件 [character] 下的 scene_mode，" +
     "按需将背景数据导入目标模式对应的数据库，再重新运行代码。";
   badge.setAttribute("role", "img");
   badge.setAttribute("aria-label", badge.title);

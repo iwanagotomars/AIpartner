@@ -692,74 +692,158 @@ class MemoryManager:
             print(f"[RAG] 统计区间 {min_importance}-{max_importance} 记忆数量时发生错误: {e}")
             return 0
 
+    @staticmethod
+    def _time_range_conditions(
+        start_time: str | float,
+        end_time: str | float,
+        include_backstory: bool = False,
+    ) -> list[dict]:
+        """解析本地时间；纯日期结束值包含全天，精确时间结束值包含该时刻。"""
+        from datetime import timedelta
+        import math
+
+        def parse_time(value):
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                timestamp = float(value)
+                if not math.isfinite(timestamp):
+                    raise ValueError("时间戳必须是有限数值。")
+                return timestamp, None
+            if isinstance(value, str):
+                value = value.strip()
+                try:
+                    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").timestamp(), None
+                except ValueError:
+                    try:
+                        day = datetime.strptime(value, "%Y-%m-%d")
+                    except ValueError:
+                        raise ValueError(
+                            f"无法识别的时间格式: {value}。请使用 "
+                            "'YYYY-MM-DD' 或 'YYYY-MM-DD HH:MM:SS'"
+                        ) from None
+                    return day.timestamp(), day
+            raise TypeError("时间参数必须是字符串、整数或浮点数。")
+
+        start = parse_time(start_time)
+        end = parse_time(end_time)
+        if start[0] > end[0]:
+            print("[RAG] 警告：开始时间晚于结束时间，已自动互换。")
+            start, end = end, start
+
+        # 先互换原始边界，再展开结束日期，避免反向日期范围少算一天。
+        end_operator = "$lte"
+        end_ts = end[0]
+        if end[1] is not None:
+            end_ts = (end[1] + timedelta(days=1)).timestamp()
+            end_operator = "$lt"
+
+        conditions = [
+            {"timestamp": {"$gte": start[0]}},
+            {"timestamp": {end_operator: end_ts}},
+        ]
+        if not include_backstory:
+            conditions.append({"category": {"$ne": BACKSTORY_CATEGORY}})
+        return conditions
+
+    def get_memories_by_time_range(
+        self,
+        start_time: str | float,
+        end_time: str | float,
+        *,
+        sample_threshold: int = 100,
+        category: str | None = None,
+        memory_owner: str | None = None,
+        min_importance: int = 1,
+        include_backstory: bool = False,
+    ) -> dict:
+        """
+        按日期范围检索数据库记录，以 (timestamp, id) 升序返回。
+
+        支持 YYYY-MM-DD、YYYY-MM-DD HH:MM:SS 和 Unix 时间戳。
+        纯日期结束值包含当天，精确时间结束值包含该时刻；反向范围自动互换。
+        记录数超过 sample_threshold 时，按排序后的位置均匀采样该数量，
+        并保留首尾记录。阈值必须为至少 2 的整数。计数及采样单位为数据库切片。
+        时间依据元数据 timestamp，而非正文中的事件发生时间。
+        """
+        if type(sample_threshold) is not int or sample_threshold < 2:
+            raise ValueError("sample_threshold 必须是大于等于 2 的整数。")
+
+        conditions = self._time_range_conditions(
+            start_time, end_time, include_backstory or bool(category)
+        )
+        if category:
+            conditions.append({"category": category})
+        if memory_owner:
+            conditions.append({"memory_owner": memory_owner})
+        if min_importance > 1:
+            conditions.append({"importance": {"$gte": min_importance}})
+
+        metadata_results = self.collection.get(
+            where={"$and": conditions}, include=["metadatas"]
+        )
+        items = sorted(
+            zip(metadata_results["ids"], metadata_results["metadatas"]),
+            key=lambda item: (item[1]["timestamp"], item[0]),
+        )
+        total_count = len(items)
+        sampled = total_count > sample_threshold
+        if sampled:
+            items = [
+                items[i * (total_count - 1) // (sample_threshold - 1)]
+                for i in range(sample_threshold)
+            ]
+
+        selected_ids = [doc_id for doc_id, _ in items]
+        memories = []
+        if selected_ids:
+            results = self.collection.get(
+                ids=selected_ids, include=["documents", "metadatas"]
+            )
+            lookup = {
+                doc_id: {
+                    "id": doc_id,
+                    "text": doc,
+                    "timestamp": meta["timestamp"],
+                    "category": meta.get("category"),
+                    "importance": meta.get("importance", 0),
+                    "memory_owner": meta.get("memory_owner"),
+                }
+                for doc_id, doc, meta in zip(
+                    results["ids"], results["documents"], results["metadatas"]
+                )
+            }
+            memories = [lookup[doc_id] for doc_id in selected_ids if doc_id in lookup]
+
+        return {
+            "total_count": total_count,
+            "returned_count": len(memories),
+            "sampled": sampled,
+            "memories": memories,
+        }
+
     def count_memories_by_time_range(self, start_time: str | float,
                                      end_time: str | float,
                                      include_backstory: bool = False) -> int:
         """
         按照时间范围统计数据库中的记忆数量。
-        
-        支持的输入格式：
-        1. 字符串：如 "2023-10-01" 或 "2023-10-01 15:30:00" (用户友好)
-        2. 浮点数：Unix时间戳，如 1696118400.0 (程序/数据库查询友好)
-        
-        :param start_time: 开始时间
-        :param end_time: 结束时间
-        :return: 满足条件的记忆总数量
-        """
-        
-        # ==========================================
-        # 步骤 1：时间格式统一化 (字符串 -> 时间戳)
-        # ==========================================
-        def parse_time(t) -> float:
-            if isinstance(t, (int, float)):
-                return float(t)
-            if isinstance(t, str):
-                try:
-                    # 尝试解析带具体时间的格式
-                    dt = datetime.strptime(t, "%Y-%m-%d %H:%M:%S")
-                except ValueError:
-                    try:
-                        # 退化尝试解析仅日期的格式
-                        dt = datetime.strptime(t, "%Y-%m-%d")
-                    except ValueError:
-                        raise ValueError(f"无法识别的时间格式: {t}。请使用 'YYYY-MM-DD' 或 'YYYY-MM-DD HH:MM:SS'")
-                return dt.timestamp()
-            raise TypeError("时间参数必须是字符串、整数或浮点数。")
 
+        支持 YYYY-MM-DD、YYYY-MM-DD HH:MM:SS 和 Unix 时间戳。
+        纯日期结束值使用次日零点作为排他上界，包含结束日期全天；
+        精确时间结束值使用包含边界。反向范围自动互换。
+        """
         try:
-            start_ts = parse_time(start_time)
-            end_ts = parse_time(end_time)
+            conditions = self._time_range_conditions(
+                start_time, end_time, include_backstory
+            )
         except Exception as e:
             print(f"[RAG] 时间解析错误: {e}")
             return 0
 
-        # ==========================================
-        # 步骤 2：区间纠错 (防呆设计)
-        # ==========================================
-        if start_ts > end_ts:
-            print(f"[RAG] 警告：开始时间晚于结束时间，已自动互换。")
-            start_ts, end_ts = end_ts, start_ts
-
-        # ==========================================
-        # 步骤 3：组装并执行极速查询
-        # ==========================================
-        conditions = [
-            {"timestamp": {"$gte": start_ts}},
-            {"timestamp": {"$lte": end_ts}},
-        ]
-        if not include_backstory:
-            conditions.append({"category": {"$ne": BACKSTORY_CATEGORY}})
-        where_clause = {"$and": conditions}
-
         try:
-            # 依然采用 include=[] 的剥离载荷策略，极限压榨查询性能
             results = self.collection.get(
-                where=where_clause,
-                include=[] 
+                where={"$and": conditions},
+                include=[],
             )
-            
-            return len(results.get('ids', []))
-            
+            return len(results.get("ids", []))
         except Exception as e:
             print(f"[RAG] 统计时间范围记忆数量时发生错误: {e}")
             return 0

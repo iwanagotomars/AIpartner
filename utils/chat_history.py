@@ -4,6 +4,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 import json
+import re
 
 
 class HistoryQueueEmptyError(LookupError):
@@ -38,6 +39,7 @@ class ChatHistoryStore:
         user_text: str,
         speaker: str,
         created_at: float,
+        image_data_urls: list[str] | None = None,
     ) -> dict[str, Any]:
         """创建新轮次并记录用户输入。"""
         event = self._new_event(
@@ -54,6 +56,10 @@ class ChatHistoryStore:
             if any(turn.get("turn_id") == turn_id for turn in data["turns"]):
                 raise ValueError(f"历史轮次已存在：{turn_id}")
 
+            # 附件属于用户事件，回复失败也保留；不向模型上下文添加路径。
+            if image_data_urls:
+                event["images"] = self._save_images(turn_id, image_data_urls)
+
             data["turns"].append({
                 "turn_id": turn_id,
                 "started_at": created_at,
@@ -61,10 +67,53 @@ class ChatHistoryStore:
                 "status": "in_progress",
                 "events": [event],
             })
+            removed_turns = data["turns"][:-self.max_turns]
             data["turns"] = data["turns"][-self.max_turns:]
-            self._write_unlocked(data)
+            try:
+                self._write_unlocked(data)
+            except Exception:
+                self._delete_images(event.get("images", []))
+                raise  # 交给原有的历史写入失败处理。
+            # 先提交 JSON 再清理文件，避免写入失败时破坏旧历史。
+            for turn in removed_turns:
+                for old_event in turn.get("events", []):
+                    self._delete_images(old_event.get("images", []))
             self._ready_queue.append(deepcopy(event))
         return event
+
+    def image_path(self, filename: str) -> Path:
+        """读取和删除共用范围检查，只允许当前记忆目录内的历史附件。"""
+        if not re.fullmatch(r"image_[A-Za-z0-9_-]+_\d{2}\.jpg", filename):
+            raise ValueError("无效的历史图片文件名")
+        directory = (self.directory / "images").resolve()
+        path = directory / filename
+        if path.resolve().parent != directory:
+            raise ValueError("历史图片超出附件目录")
+        return path
+
+    def _save_images(self, turn_id: str, data_urls: list[str]) -> list[str]:
+        from utils.vision import history_image_bytes, MAX_CHAT_IMAGES
+
+        filenames = []
+        for index, data_url in enumerate(data_urls[:MAX_CHAT_IMAGES], 1):
+            filename = f"image_{turn_id}_{index:02d}.jpg"
+            try:
+                path = self.image_path(filename)
+                content = history_image_bytes(data_url)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+                filenames.append(filename)
+            except (OSError, ValueError) as error:
+                print(f"[历史图片保存失败] {filename}: {error}")
+                self._delete_images([filename])
+        return filenames
+
+    def _delete_images(self, filenames: list[str]) -> None:
+        for filename in filenames:
+            try:
+                self.image_path(filename).unlink(missing_ok=True)
+            except (OSError, ValueError) as error:
+                print(f"[历史图片清理失败] {filename}: {error}")
 
     def append_event(
         self,
@@ -128,11 +177,13 @@ class ChatHistoryStore:
                 content=content,
                 created_at=completed_at,
             )
-            turn["events"].append(event)
+            if content.strip():
+                turn["events"].append(event)
             turn["completed_at"] = completed_at
             turn["status"] = "completed"
             self._write_unlocked(data)
-            self._ready_queue.append(deepcopy(event))
+            if content.strip():
+                self._ready_queue.append(deepcopy(event))
         return event
 
     def fail_turn(self, turn_id: str, completed_at: float) -> None:

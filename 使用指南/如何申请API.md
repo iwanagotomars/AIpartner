@@ -13,17 +13,45 @@
 
 ```dotenv
 LLM_API_KEY="这里填写 DeepSeek API Key"
-LLM_MODEL_ID="deepseek-v4-flash"
+LLM_MODEL_ID="deepseek-flash"
 LLM_BASE_URL="https://api.deepseek.com"
 ```
 
-`LLM_MODEL_ID` 请填写 [DeepSeek 官方接入文档](https://api-docs.deepseek.com/zh-cn/) 中当前可用的模型 ID，例如 `deepseek-v4-flash`。模型名称可能更新，此处示例不表示所有 DeepSeek 模型均已通过本项目测试。`LLM_BASE_URL` 使用上面的 API 地址，不是网页版聊天地址。
+`LLM_MODEL_ID` 请填写 [DeepSeek 官方接入文档](https://api-docs.deepseek.com/zh-cn/) 中当前可用的模型 ID，例如 `deepseek-flash`。模型名称可能更新，此处示例不表示所有 DeepSeek 模型均已通过本项目测试。`LLM_BASE_URL` 使用上面的 API 地址，不是网页版聊天地址。
 
 保存后完整退出并重新启动 AIpartner，打开角色发送一条消息进行测试。如果调用失败，优先核对密钥、模型 ID、账户余额和终端错误信息。
 
 **不要将真实 API Key 或 `.env` 上传到 GitHub，也不要在截图中暴露密钥。** 对话内容会发送给所配置的大模型服务商，请留意隐私。
 
-以上 DeepSeek 申请与配置指引核对于 2026-08-31，实际开通流程及可用模型请以官方页面为准。
+以上 DeepSeek 申请与配置指引核对于 2026-09-16，实际开通流程及可用模型请以官方页面为准。
+
+# 如何配置视觉模型 API（可选）
+
+视觉模型 API 只用于识别聊天中附带的图片，不配置也不影响纯文字聊天。请在支持图片输入的模型服务商处注册账号、创建 API Key，并确认所选模型同时支持：
+
+- 图片输入；
+- 工具调用（Function Calling / Tool Calling）；
+- OpenAI 风格的 Chat Completions 接口及本项目发送的 `thinking` 扩展参数。
+
+然后在项目根目录的 `.env` 中填写：
+
+```dotenv
+LLM_VISION_API_KEY="这里填写视觉模型 API Key"
+LLM_VISION_MODEL_ID="这里填写视觉模型 ID"
+LLM_VISION_BASE_URL="这里填写视觉模型 API 地址"
+```
+
+三项必须同时填写。保存后完整停止并重新启动 AIpartner；若角色配置中的 `[vision]` 保持 `vision = true`，聊天输入框左侧应出现可用的图片入口。
+
+当前 DeepSeek V4.1 Flash 支持图片理解和工具调用，因此使用 DeepSeek 时，可以复用正常对话的 API Key：
+
+```dotenv
+LLM_VISION_API_KEY="这里填写与 LLM_API_KEY 相同的 DeepSeek API Key"
+LLM_VISION_MODEL_ID="deepseek-flash"
+LLM_VISION_BASE_URL="https://api.deepseek.com"
+```
+
+视觉模型服务商会接收到上传的图片及本轮相关文字。请查看服务商的隐私与数据处理规则，不要上传身份证件、密钥截图或其他不希望交由第三方处理的敏感内容。
 
 # 如何申请搜索 API
 
@@ -77,9 +105,10 @@ ZHIPU_SEARCH_ENGINE="search_pro"
 ## 三、配置后如何使用
 
 1. 保存 `.env`，完整退出并重新启动 AIpartner，仅刷新网页不会重新加载密钥。
-2. 在角色的 `character_config.toml` 顶层（所有 `[区域名]` 之前）设置：
+2. 在角色的 `character_config.toml` 的 `[character]` 下设置：
 
    ```toml
+   [character]
    scene_mode = "realtime"
    ```
 

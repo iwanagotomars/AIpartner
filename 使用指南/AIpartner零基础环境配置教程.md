@@ -397,16 +397,22 @@ API Key 可以理解为程序访问你账户的凭证，不要轻易给别人。
 
 ```dotenv
 LLM_API_KEY="把这里替换成你申请的完整API Key"
-LLM_MODEL_ID="deepseek-v4-flash"
+LLM_MODEL_ID="deepseek-flash"
 LLM_BASE_URL="https://api.deepseek.com"
 
+# 可选：图片识别；暂时不用时保持为空
+LLM_VISION_API_KEY=""
+LLM_VISION_MODEL_ID=""
+LLM_VISION_BASE_URL=""
+
+# 网络搜索：暂时不用时保持为空
 ZHIPU_API_KEY=""
 BAIDU_API_KEY=""
 ```
 
-将第一行引号内的文字替换为自己的真实密钥。保留英文半角双引号，不要粘贴多余空格，也不要将 API Key 换成账号密码。
+将 `LLM_API_KEY` 引号内的文字替换为自己的真实密钥。保留英文半角双引号，不要粘贴多余空格，也不要将 API Key 换成账号密码。视觉模型和搜索 API 都是可选功能，第一次安装时可以先保持为空。
 
-上面的模型 ID 和地址参考 [DeepSeek 官方接入文档](https://api-docs.deepseek.com/zh-cn/)，核对日期为 2026 年 9 月 5 日。服务商可能调整可用模型；若提示模型不存在，请核对官方当前说明。
+上面的模型 ID 和地址参考 [DeepSeek 官方接入文档](https://api-docs.deepseek.com/zh-cn/)，核对日期为 2026 年 9 月 16 日。服务商可能调整可用模型；若提示模型不存在，请核对官方当前说明。
 
 搜索 API 属于可选功能。第一次安装可以让 `ZHIPU_API_KEY` 和 `BAIDU_API_KEY` 保持为空，先完成正常聊天。需要联网搜索时，再阅读项目 `使用指南` 文件夹中的《如何申请API.md》。
 
@@ -435,6 +441,39 @@ python -c "from utils.llm import get_llm; r=get_llm().invoke('只回复OK'); pri
 如果返回 `OK` 或其他正常文字，说明基础接口已经连通。如果报错，先检查密钥、模型 ID、API 地址、账户余额和网络。
 
 ![API连接测试](../images/API连接测试.png)
+
+### 5. 可选：启用图片识别
+
+基础文字聊天正常后，如果希望在聊天中上传图片，还需要向支持视觉模型的服务商申请 API，并确认模型同时支持图片输入、工具调用和 OpenAI 风格的 Chat Completions 接口。
+
+将服务商提供的信息填写到 `.env`：
+
+```dotenv
+LLM_VISION_API_KEY="视觉模型的 API Key"
+LLM_VISION_MODEL_ID="视觉模型 ID"
+LLM_VISION_BASE_URL="视觉模型 API 地址"
+```
+
+三项必须同时填写，不能只填写其中一部分。保存后完整停止并重新启动 AIpartner；默认角色配置已设置 `vision = true`，配置有效时，聊天输入框左侧会出现可用的图片入口。不配置视觉模型不会影响文字聊天。
+
+目前支持 JPG、JPEG 和 PNG，一次最多上传 3 张，单张不超过 10 MiB。图片及本轮相关文字会发送给所配置的视觉模型服务商，请勿上传不希望交由第三方处理的敏感内容。更详细的配置和角色开关说明见《如何申请API.md》和《如何创建新角色.md》。
+
+**目前DeepSeek V4.1 Flash支持图片识别**，因此可以直接写成如下格式：
+
+```text
+LLM_API_KEY="把这里替换成你申请的完整API Key"
+LLM_MODEL_ID="deepseek-flash"
+LLM_BASE_URL="https://api.deepseek.com"
+
+# 图片识别
+LLM_VISION_API_KEY="把这里替换成你申请的完整API Key，和 LLM_API_KEY 一样即可"
+LLM_VISION_MODEL_ID="deepseek-flash"
+LLM_VISION_BASE_URL="https://api.deepseek.com"
+
+# 网络搜索：暂时不用时保持为空
+ZHIPU_API_KEY=""
+BAIDU_API_KEY=""
+```
 
 ## 九、一键启动 AIpartner
 
@@ -548,6 +587,16 @@ http://127.0.0.1:8000
 
 **修改 `.env` 后，需要完整停止并重新启动服务，单纯刷新网页不会重新加载配置。**
 
+### 4. 被Windows安全中心阻止
+
+Windows安全中心可能会阻止一键启动脚本调用python环境等操作，这时候可以：
+
+1. 将`start_aipartner.bat`用记事本打开；
+2. 随便找一个空行，打一个空格，再删除空格；
+3. 保存文件，关闭文件。
+
+这时候一般来说，Windows安全中心就不会再阻止了。
+
 ## 十一、完成检查
 
 完成以下项目后，就可以正常使用了：
@@ -558,6 +607,7 @@ http://127.0.0.1:8000
 - [ ] 记忆模型已下载到正确目录。
 - [ ] `.env` 的三项大模型配置已填写，接口测试能返回文字。
 - [ ] 双击 `start_aipartner.bat` 后能打开网页，并完成一次文本聊天。
+- [ ] 如需图片识别：三项视觉模型配置已填写，聊天输入框能选择图片并得到正常回复。
 - [ ] 如需配音：CUDA 可用，语音模型和角色素材齐全，已实际听到角色配音。
 
 角色制作不属于首次环境安装的必需步骤。先使用自带角色确认程序可用，再阅读项目 `使用指南` 文件夹中的《如何创建新角色.md》，制作自己的角色。

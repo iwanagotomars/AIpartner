@@ -101,6 +101,122 @@ let pendingAssetType = null;
 let assetUploadPending = false;
 let uiStatusTimer = null;
 
+
+// 文件对象和预览 URL 属于草稿；只有后端确认成功才清空。
+const attachmentButton = document.getElementById("attachmentButton");
+const attachmentMenu = document.getElementById("attachmentMenu");
+const addImageButton = document.getElementById("addImageButton");
+const chatImageInput = document.getElementById("chatImageInput");
+const attachmentPanel = document.getElementById("attachmentPanel");
+const imagePreviews = document.getElementById("imagePreviews");
+const imageCount = document.getElementById("imageCount");
+const imagePreviewToggle = document.getElementById("imagePreviewToggle");
+let imagePreviewCollapsed = false;
+
+// 只折叠展示，不改变附件草稿；失败恢复时仍保持用户选择的展开状态。
+function updateImagePreviewState() {
+  imagePreviews.hidden = imagePreviewCollapsed;
+  imageCount.hidden = imagePreviewCollapsed;
+  attachmentPanel.classList.toggle("is-collapsed", imagePreviewCollapsed);
+  imagePreviewToggle.textContent = imagePreviewCollapsed
+    ? `已选 ${pendingImages.length} 张图片 ▲` : "▼";
+  imagePreviewToggle.setAttribute("aria-expanded", String(!imagePreviewCollapsed));
+  imagePreviewToggle.setAttribute("aria-label", imagePreviewCollapsed ? "展开图片预览" : "收起图片预览");
+}
+imagePreviewToggle.addEventListener("click", () => {
+  imagePreviewCollapsed = !imagePreviewCollapsed;
+  updateImagePreviewState();
+});
+let pendingImages = [];
+let sendInFlight = false;
+let visionEnabled = false;
+let maxChatImages = 3;
+let maxImageBytes = 10 * 1024 * 1024;
+
+function clearImageDraft() {
+  pendingImages.forEach(({ preview }) => URL.revokeObjectURL(preview));
+  pendingImages = [];
+  imagePreviewCollapsed = false;
+  renderImageDraft();
+}
+
+function renderImageDraft() {
+  imagePreviews.replaceChildren();
+  pendingImages.forEach(({ preview }, index) => {
+    const card = document.createElement("div");
+    card.className = "image-preview";
+    const img = document.createElement("img");
+    img.src = preview;
+    img.alt = `待发送图片${index + 1}`;
+    const label = document.createElement("span");
+    label.textContent = `图片${index + 1}`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `删除图片${index + 1}`);
+    remove.addEventListener("click", () => {
+      if (sendButton.disabled) return;
+      URL.revokeObjectURL(pendingImages[index].preview);
+      pendingImages.splice(index, 1);
+      renderImageDraft();
+    });
+    card.append(img, label, remove);
+    imagePreviews.appendChild(card);
+  });
+  attachmentPanel.hidden = pendingImages.length === 0;
+  imageCount.textContent = `已选 ${pendingImages.length}/${maxChatImages} 张图片`;
+  if (!pendingImages.length) imagePreviewCollapsed = false;
+  updateImagePreviewState();
+  applyControlState();
+}
+
+function fileDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("无法读取图片，请重新选择。"));
+    reader.onabort = () => reject(new Error("图片读取已取消。"));
+    reader.readAsDataURL(file);
+  });
+}
+
+attachmentButton.addEventListener("click", () => {
+  attachmentMenu.hidden = !attachmentMenu.hidden;
+  attachmentButton.setAttribute("aria-expanded", String(!attachmentMenu.hidden));
+});
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".attachment-actions")) {
+    attachmentMenu.hidden = true;
+    attachmentButton.setAttribute("aria-expanded", "false");
+  }
+});
+addImageButton.addEventListener("click", () => {
+  if (!visionEnabled || pendingImages.length >= maxChatImages || sendButton.disabled) return;
+  attachmentMenu.hidden = true;
+  attachmentButton.setAttribute("aria-expanded", "false");
+  chatImageInput.click();
+});
+chatImageInput.addEventListener("change", () => {
+  const files = Array.from(chatImageInput.files || []);
+  chatImageInput.value = ""; // 允许移除后重新选择同一文件。
+  if (!files.length || sendButton.disabled || !visionEnabled) return;
+  if (files.length + pendingImages.length > maxChatImages) {
+    showUiError(`最多添加${maxChatImages}张图片，还可添加${maxChatImages - pendingImages.length}张。`);
+    return;
+  }
+  if (files.some((file) => !/\.(jpe?g|png)$/i.test(file.name) ||
+      !["image/jpeg", "image/png"].includes(file.type) || file.size > maxImageBytes)) {
+    showUiError("请选择 JPG、JPEG 或 PNG 图片，单张不超过10 MiB。");
+    return;
+  }
+  imagePreviewCollapsed = false; // 新添加图片时展开，便于核对本次选择。
+  pendingImages.push(...files.map((file) => ({ file, preview: URL.createObjectURL(file) })));
+  renderImageDraft();
+});
+window.addEventListener("pagehide", () => {
+  pendingImages.forEach(({ preview }) => URL.revokeObjectURL(preview));
+});
+
 function setBackgroundVariable(name, url) {
   document.body.style.setProperty(name, url ? `url("${url}")` : "none");
 }
@@ -156,7 +272,12 @@ async function loadDisplayBootstrap() {
       throw new Error(getErrorMessage(data, "无法读取旮旯模式初始化信息。"));
     }
 
+    visionEnabled = data.vision_enabled === true;
+    maxChatImages = data.max_chat_images || 3;
+    maxImageBytes = data.max_image_bytes || 10 * 1024 * 1024;
+    document.getElementById("visionHint").textContent = data.vision_unavailable_reason || `最多${maxChatImages}张，单张不超过10 MiB`;
     updateChatMode(Boolean(data.display_enabled));
+    applyControlState();
     if (data.display_enabled) showGalWelcome(data.default_portrait_url);
   } catch (error) {
     // 初始化展示失败不应阻断历史记录、状态轮询或正常对话。
@@ -258,12 +379,16 @@ async function unlockAudio() {
 
 function applyControlState() {
   const disabled = (
-    polling_status === "busy" ||
+    sendInFlight || polling_status === "busy" ||
     closingCharacter ||
     conversationBlocked
   );
   inputBox.disabled = disabled;
   sendButton.disabled = disabled;
+  attachmentButton.disabled = disabled;
+  addImageButton.disabled = disabled || !visionEnabled || pendingImages.length >= maxChatImages;
+  chatImageInput.disabled = disabled || !visionEnabled;
+  imagePreviews.querySelectorAll("button").forEach((button) => { button.disabled = disabled; });
   closeCharacterButton.disabled = disabled;
   galModeButton.disabled = disabled;
   textModeButton.disabled = disabled;
@@ -327,6 +452,10 @@ function createHistoryEventElement(event) {
   const speaker = document.createElement("strong");
   speaker.className = "history-speaker";
   speaker.textContent = role === "user" ? "你" : event.speaker || "未知";
+  if (event.type === "vision_description") {
+    row.classList.add("history-event--vision");
+    speaker.textContent += " · 图片识别结果";
+  }
   message.appendChild(speaker);
 
   const content = String(event.content || "");
@@ -334,8 +463,9 @@ function createHistoryEventElement(event) {
   contentElement.className = "history-content";
   const characters = Array.from(content);
 
-  if (event.type === "tool_output" && characters.length > 20) {
-    const collapsedText = `${characters.slice(0, 20).join("")}……`;
+  const collapseLimit = event.type === "vision_description" ? 60 : 20;
+  if (["tool_output", "vision_description"].includes(event.type) && characters.length > collapseLimit) {
+    const collapsedText = `${characters.slice(0, collapseLimit).join("")}……`;
     let expanded = false;
     contentElement.textContent = collapsedText;
 
@@ -352,6 +482,30 @@ function createHistoryEventElement(event) {
   } else {
     contentElement.textContent = content;
     message.appendChild(contentElement);
+  }
+
+  // 实时事件与分页历史共用此入口；旧记录没有 images 时保持纯文本。
+  if (role === "user" && Array.isArray(event.images) && event.images.length) {
+    const images = document.createElement("div");
+    images.className = "history-images";
+    event.images.forEach((filename, index) => {
+      const frame = document.createElement("div");
+      frame.className = "history-image-frame";
+      const image = document.createElement("img");
+      image.alt = `用户发送的第 ${index + 1} 张图片`;
+      image.loading = "lazy";
+      image.decoding = "async";
+      // 只替换一次，默认资源失效时也不会循环请求。
+      image.addEventListener("error", () => {
+        image.src = "/static/imgs/image_load_error.png";
+        image.alt = "图片已失效或无法加载";
+      }, { once: true });
+      image.src = `/api/characters/${encodedCharacter}/history/images/` +
+        encodeURIComponent(filename) + "?runtime_id=" + encodeURIComponent(runtimeId);
+      frame.appendChild(image);
+      images.appendChild(frame);
+    });
+    message.appendChild(images);
   }
 
   row.append(avatar, message);
@@ -831,51 +985,50 @@ async function setChatMode(mode) {
 }
 
 async function sendMessage() {
+  if (sendButton.disabled || sendInFlight) return;
   const message = inputBox.value.trim();
-  if (!message) return;
+  if (!message && !pendingImages.length) return;
 
+  // 与后端忙碌锁互补：读取文件、上传期间后端可能仍报告空闲。
+  sendInFlight = true;
+  document.body.dataset.sendInFlight = "true";
+  attachmentMenu.hidden = true;
+  attachmentButton.setAttribute("aria-expanded", "false");
   voiceStatus.textContent = "";
-  if (displayEnabled) galView.showDialogue("你", message);
+  if (displayEnabled) galView.showDialogue("你", message || `[用户发送了${pendingImages.length}张图片]`);
   consecutiveIdleChecks = 0;
   setPollingStatus("busy");
   requestImmediatePoll();
 
-  if (displayEnabled) {
-    await unlockAudio();
-  }
-
   try {
+    if (displayEnabled) await unlockAudio();
+    const images = await Promise.all(pendingImages.map(async ({ file }) => ({
+      data_url: await fileDataUrl(file),
+    })));
     const response = await fetch(
       `/api/characters/${encodedCharacter}/chat`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message,
-          runtime_id: runtimeId,
-        }),
+        body: JSON.stringify({ message, runtime_id: runtimeId, images }),
       },
     );
     const data = await response.json();
-
-    if (
-      response.status === 409 &&
-      data.detail?.code === "message_state_invalid"
-    ) {
+    if (response.status === 409 && data.detail?.code === "message_state_invalid") {
       conversationBlocked = true;
       voiceStatus.textContent = data.detail.message;
       return;
     }
-
-    if (!response.ok) {
-      throw new Error(getErrorMessage(data, "请求失败。"));
-    }
-
+    if (!response.ok) throw new Error(getErrorMessage(data, "请求失败。"));
     updateChatMode(data.display_enabled);
     inputBox.value = "";
+    clearImageDraft();
+    // image_description 仅表示本次识别状态；历史由 FIFO 统一交付，避免重复插入。
   } catch (error) {
     voiceStatus.textContent = "请求失败：" + error.message;
   } finally {
+    sendInFlight = false;
+    document.body.dataset.sendInFlight = "false";
     applyControlState();
     requestImmediatePoll();
   }

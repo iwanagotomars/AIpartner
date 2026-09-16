@@ -2,10 +2,9 @@ from copy import deepcopy
 from pathlib import Path
 from threading import Lock
 from typing import Any
-import json
 import tomllib
 import os
-import re
+import tomlkit
 from uuid import uuid4
 
 
@@ -39,9 +38,13 @@ VALID_CHAT_THEMES = {
     "mystic_purple",
     "midnight_black",
 }
-_CHAT_THEME_LINE = re.compile(r"^[ \t]*chat_theme[ \t]*=", re.MULTILINE)
-_FAVOUR_LINE = re.compile(r"^[ \t]*favour[ \t]*=", re.MULTILINE)
-_GROUP_LINE = re.compile(r"^[ \t]*group[ \t]*=", re.MULTILINE)
+_LEGACY_FIELDS = {
+    "true_character_name": "character",
+    "scene_mode": "character",
+    "chat_theme": "frontend",
+    "favour": "frontend",
+    "group": "frontend",
+}
 _CONFIG_WRITE_LOCK = Lock()
 
 
@@ -185,279 +188,182 @@ def normalize_character_group(value: Any) -> str:
         return ""
 
 
-def _replace_chat_theme(source: str, chat_theme: str) -> str:
-    """只替换顶层 chat_theme 行，保留其余配置文本。"""
-    lines = source.splitlines(keepends=True)
-    section_index = next(
-        (
-            index
-            for index, line in enumerate(lines)
-            if line.lstrip().startswith("[")
-        ),
-        len(lines),
+def _migrate_document(document: Any) -> tuple[Any, bool]:
+    """按原文顺序聚合旧字段；不补默认值，已有新值优先。"""
+    for section in ("character", "frontend"):
+        if section in document and not isinstance(document[section], dict):
+            raise ValueError(f"角色配置 [{section}] 必须是 TOML 表")
+    if not any(key in document for key in _LEGACY_FIELDS):
+        return document, False
+
+    # 新分区按第一次遇到旧字段的顺序建立；已有分区仍留在原位。
+    new_sections = {}
+    kept = []
+    pending = []
+    seen_key = False
+    header_count = 0
+    for key, item in document.body:
+        if key is None:
+            pending.append((key, item))
+            continue
+        name = key.key
+        section = _LEGACY_FIELDS.get(name)
+        if not seen_key:
+            # 文件开头的注释统一作为总说明保留，不猜测其语义归属。
+            kept.extend(pending)
+            header_count = len(kept)
+            pending = []
+            seen_key = True
+        if section is None:
+            kept.extend(pending)
+            kept.append((key, item))
+        else:
+            if section in document:
+                target = document[section]
+            else:
+                target = new_sections.setdefault(section, tomlkit.table())
+            if name not in target:
+                # 空行前的独立注释留在原处，仅移动紧邻字段的说明。
+                split = next(
+                    (i + 1 for i in range(len(pending) - 1, -1, -1)
+                     if pending[i][1].as_string().strip() == ""), 0,
+                )
+                kept.extend(pending[:split])
+                for comment_key, comment in pending[split:]:
+                    target.append(comment_key, comment)
+                target.append(key, item)
+            else:
+                kept.extend(pending)
+                if target[name] != item:
+                    print(f"[配置迁移] {section}.{name} 优先，已移除旧顶层 {name}。")
+        pending = []
+    kept.extend(pending)
+
+    # 保留所有无关条目；新分区插在原有第一个表之前，避免顶层键落入表中。
+    insert_at = next(
+        (i for i, (_, item) in enumerate(kept)
+         if isinstance(item, (tomlkit.items.Table, tomlkit.items.AoT))), len(kept),
     )
-    matches = [
-        index
-        for index, line in enumerate(lines[:section_index])
-        if _CHAT_THEME_LINE.match(line)
-    ]
-    if len(matches) > 1:
-        raise ValueError("角色配置存在重复的顶层 chat_theme")
-
-    newline = "\r\n" if "\r\n" in source else "\n"
-    theme_line = f'chat_theme = "{chat_theme}"'
-    if matches:
-        old_line = lines[matches[0]]
-        line_ending = (
-            "\r\n" if old_line.endswith("\r\n")
-            else "\n" if old_line.endswith("\n")
-            else ""
-        )
-        lines[matches[0]] = theme_line + line_ending
-        return "".join(lines)
-
-    if section_index == len(lines):
-        if source and not source.endswith(("\n", "\r")):
-            lines.append(newline)
-        lines.append(theme_line + newline)
-    else:
-        lines.insert(section_index, theme_line + newline + newline)
-    return "".join(lines)
+    # 原有表前面的注释仍紧邻该表，文件总说明保持在最前面。
+    while insert_at > header_count and kept[insert_at - 1][0] is None:
+        insert_at -= 1
+    result = tomlkit.document()
+    entries = kept[:insert_at] + list(new_sections.items()) + kept[insert_at:]
+    for key, item in entries:
+        result.append(key, item)
+    return result, True
 
 
-def _replace_favour(source: str, favour: bool) -> str:
-    """只替换顶层 favour 行，保留其余角色配置。"""
-    lines = source.splitlines(keepends=True)
-    section_index = next(
-        (
-            index
-            for index, line in enumerate(lines)
-            if line.lstrip().startswith("[")
-        ),
-        len(lines),
-    )
-    matches = [
-        index
-        for index, line in enumerate(lines[:section_index])
-        if _FAVOUR_LINE.match(line)
-    ]
-    if len(matches) > 1:
-        raise ValueError("角色配置存在重复的顶层 favour")
-
-    newline = "\r\n" if "\r\n" in source else "\n"
-    favour_line = f"favour = {'true' if favour else 'false'}"
-    if matches:
-        old_line = lines[matches[0]]
-        line_ending = (
-            "\r\n" if old_line.endswith("\r\n")
-            else "\n" if old_line.endswith("\n")
-            else ""
-        )
-        lines[matches[0]] = favour_line + line_ending
-        return "".join(lines)
-
-    if section_index == len(lines):
-        if source and not source.endswith(("\n", "\r")):
-            lines.append(newline)
-        lines.append(favour_line + newline)
-    else:
-        lines.insert(section_index, favour_line + newline + newline)
-    return "".join(lines)
+def _write_document(path: Path, document: Any) -> None:
+    """调用方持有写锁；解析检查后原子替换，失败时原文件不被截断。"""
+    text = tomlkit.dumps(document)
+    tomllib.loads(text)
+    temporary_path = path.with_name(f".{uuid4().hex}.toml.tmp")
+    try:
+        with temporary_path.open("w", encoding="utf-8", newline="") as file:
+            file.write(text)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
-def _replace_group(source: str, group: str) -> str:
-    """只替换顶层 group 行，保留其余角色配置。"""
-    lines = source.splitlines(keepends=True)
-    section_index = next(
-        (
-            index
-            for index, line in enumerate(lines)
-            if line.lstrip().startswith("[")
-        ),
-        len(lines),
-    )
-    matches = [
-        index
-        for index, line in enumerate(lines[:section_index])
-        if _GROUP_LINE.match(line)
-    ]
-    if len(matches) > 1:
-        raise ValueError("角色配置存在重复的顶层 group")
+def _read_character_document(path: Path) -> Any:
+    # newline="" 保留原有换行，避免仅加载就改写配置格式。
+    with path.open("r", encoding="utf-8", newline="") as file:
+        return tomlkit.parse(file.read())
 
-    newline = "\r\n" if "\r\n" in source else "\n"
-    group_line = f"group = {json.dumps(group, ensure_ascii=False)}"
-    if matches:
-        old_line = lines[matches[0]]
-        line_ending = (
-            "\r\n" if old_line.endswith("\r\n")
-            else "\n" if old_line.endswith("\n")
-            else ""
-        )
-        lines[matches[0]] = group_line + line_ending
-        return "".join(lines)
 
-    if section_index == len(lines):
-        if source and not source.endswith(("\n", "\r")):
-            lines.append(newline)
-        lines.append(group_line + newline)
-    else:
-        lines.insert(section_index, group_line + newline + newline)
-    return "".join(lines)
+def _load_character_override(path: Path) -> dict[str, Any]:
+    with _CONFIG_WRITE_LOCK:
+        if not path.is_file():
+            return {}
+        document = _read_character_document(path)
+        document, changed = _migrate_document(document)
+        if changed:
+            _write_document(path, document)
+        return document.unwrap()
+
+
+def _save_frontend_config(
+    characters_dir: Path, character_name: str, values: dict[str, Any],
+) -> None:
+    """三个界面接口共用：先迁移，再只写入指定的 frontend 字段。"""
+    characters_dir = characters_dir.resolve()
+    character_dir = (characters_dir / character_name).resolve()
+    if character_dir.parent != characters_dir or not character_dir.is_dir():
+        raise ValueError(f"角色 '{character_name}' 不存在")
+    path = character_dir / CHARACTER_CONFIG_FILENAME
+    with _CONFIG_WRITE_LOCK:
+        document = _read_character_document(path) if path.is_file() else tomlkit.document()
+        document, _ = _migrate_document(document)
+        if "frontend" not in document:
+            document["frontend"] = tomlkit.table()
+        for key, value in values.items():
+            document["frontend"][key] = value
+        _write_document(path, document)
 
 
 def save_character_chat_theme(
-    characters_dir: Path,
-    character_name: str,
-    chat_theme: str,
+    characters_dir: Path, character_name: str, chat_theme: str,
 ) -> None:
-    """原子保存唯一允许由主题接口修改的 chat_theme 配置。"""
     if chat_theme not in VALID_CHAT_THEMES:
         raise ValueError(f"不支持的聊天主题：{chat_theme}")
-
-    characters_dir = characters_dir.resolve()
-    character_dir = (characters_dir / character_name).resolve()
-    if character_dir.parent != characters_dir or not character_dir.is_dir():
-        raise ValueError(f"角色 '{character_name}' 不存在")
-
-    default_path = characters_dir / DEFAULT_CONFIG_FILENAME
-    target_path = character_dir / CHARACTER_CONFIG_FILENAME
-    temporary_path = character_dir / f".{uuid4().hex}.toml.tmp"
-
-    with _CONFIG_WRITE_LOCK:
-        source_path = target_path if target_path.is_file() else default_path
-        with source_path.open("r", encoding="utf-8", newline="") as file:
-            source = file.read()
-        updated = _replace_chat_theme(source, chat_theme)
-        parsed = tomllib.loads(updated)
-        if parsed.get("chat_theme") != chat_theme:
-            raise ValueError("聊天主题配置写入校验失败")
-
-        try:
-            with temporary_path.open(
-                "w",
-                encoding="utf-8",
-                newline="",
-            ) as file:
-                file.write(updated)
-            os.replace(temporary_path, target_path)
-        finally:
-            temporary_path.unlink(missing_ok=True)
+    _save_frontend_config(characters_dir, character_name, {"chat_theme": chat_theme})
 
 
 def save_character_favour(
-    characters_dir: Path,
-    character_name: str,
-    favour: bool,
+    characters_dir: Path, character_name: str, favour: bool,
 ) -> None:
-    """原子保存唯一允许由喜爱接口修改的 favour 配置。"""
     if not isinstance(favour, bool):
         raise ValueError("favour 必须是布尔值")
-
-    characters_dir = characters_dir.resolve()
-    character_dir = (characters_dir / character_name).resolve()
-    if character_dir.parent != characters_dir or not character_dir.is_dir():
-        raise ValueError(f"角色 '{character_name}' 不存在")
-
-    target_path = character_dir / CHARACTER_CONFIG_FILENAME
-    temporary_path = character_dir / f".{uuid4().hex}.toml.tmp"
-
-    with _CONFIG_WRITE_LOCK:
-        if target_path.is_file():
-            with target_path.open("r", encoding="utf-8", newline="") as file:
-                source = file.read()
-        else:
-            source = ""
-        updated = _replace_favour(source, favour)
-        parsed = tomllib.loads(updated)
-        if parsed.get("favour") is not favour:
-            raise ValueError("角色喜爱配置写入校验失败")
-
-        try:
-            with temporary_path.open(
-                "w",
-                encoding="utf-8",
-                newline="",
-            ) as file:
-                file.write(updated)
-            os.replace(temporary_path, target_path)
-        finally:
-            temporary_path.unlink(missing_ok=True)
+    _save_frontend_config(characters_dir, character_name, {"favour": favour})
 
 
 def save_character_group(
-    characters_dir: Path,
-    character_name: str,
-    group: str,
-    *,
-    clear_favour: bool = False,
+    characters_dir: Path, character_name: str, group: str, *, clear_favour: bool = False,
 ) -> None:
-    """原子保存角色分组；移至未分组时可同时取消喜爱。"""
-    group = validate_character_group(group)
-
-    characters_dir = characters_dir.resolve()
-    character_dir = (characters_dir / character_name).resolve()
-    if character_dir.parent != characters_dir or not character_dir.is_dir():
-        raise ValueError(f"角色 '{character_name}' 不存在")
-
-    target_path = character_dir / CHARACTER_CONFIG_FILENAME
-    temporary_path = character_dir / f".{uuid4().hex}.toml.tmp"
-
-    with _CONFIG_WRITE_LOCK:
-        if target_path.is_file():
-            with target_path.open("r", encoding="utf-8", newline="") as file:
-                source = file.read()
-        else:
-            source = ""
-        updated = _replace_group(source, group)
-        if clear_favour:
-            updated = _replace_favour(updated, False)
-        parsed = tomllib.loads(updated)
-        if parsed.get("group") != group:
-            raise ValueError("角色分组配置写入校验失败")
-        if clear_favour and parsed.get("favour") is not False:
-            raise ValueError("角色喜爱配置写入校验失败")
-
-        try:
-            with temporary_path.open(
-                "w",
-                encoding="utf-8",
-                newline="",
-            ) as file:
-                file.write(updated)
-            os.replace(temporary_path, target_path)
-        finally:
-            temporary_path.unlink(missing_ok=True)
+    values = {"group": validate_character_group(group)}
+    if clear_favour:
+        values["favour"] = False
+    _save_frontend_config(characters_dir, character_name, values)
 
 
 def load_character_config(
     characters_dir: Path,
     character_name: str,
 ) -> dict[str, Any]:
-    """加载公共默认配置，再递归覆盖角色自己的可选配置。"""
+    """检查默认分区，迁移角色旧配置，再递归合并并校验。"""
     default_path = characters_dir / DEFAULT_CONFIG_FILENAME
     character_path = characters_dir / character_name / CHARACTER_CONFIG_FILENAME
 
     config = _read_toml(default_path)
-    if character_path.is_file():
-        config = merge_config(config, _read_toml(character_path))
-
-    true_name = config.get("true_character_name")
-    if not isinstance(true_name, str):
-        raise ValueError("角色配置 true_character_name 必须是字符串")
-    if not true_name.strip():
-        config["true_character_name"] = character_name
-    else:
-        config["true_character_name"] = true_name.strip()
-
-    scene_mode = config.get("scene_mode")
-    if scene_mode not in VALID_SCENE_MODES:
+    # 默认文件必须由用户更新，不能用自动迁移掩盖默认配置版本落后。
+    if any(not isinstance(config.get(section), dict) for section in ("character", "frontend")):
         raise ValueError(
-            "角色配置 scene_mode 只能是 'realtime' 或 'sandbox'"
+            f"默认角色配置缺少有效的 [character] 或 [frontend]：{default_path}。"
+            "请将 character_config.default.toml 更新到最新版本。"
+        )
+    config = merge_config(config, _load_character_override(character_path))
+    character = config["character"]
+    frontend = config["frontend"]
+
+    true_name = character.get("true_character_name")
+    if not isinstance(true_name, str):
+        raise ValueError("角色配置 character.true_character_name 必须是字符串")
+    if not true_name.strip():
+        character["true_character_name"] = character_name
+    else:
+        character["true_character_name"] = true_name.strip()
+
+    scene_mode = character.get("scene_mode")
+    if not isinstance(scene_mode, str) or scene_mode not in VALID_SCENE_MODES:
+        raise ValueError(
+            "角色配置 character.scene_mode 只能是 'realtime' 或 'sandbox'"
         )
 
-    config["chat_theme"] = normalize_chat_theme(config.get("chat_theme"))
-    config["favour"] = normalize_favour(config.get("favour"))
-    config["group"] = normalize_character_group(config.get("group", ""))
+    frontend["chat_theme"] = normalize_chat_theme(frontend.get("chat_theme"))
+    frontend["favour"] = normalize_favour(frontend.get("favour"))
+    frontend["group"] = normalize_character_group(frontend.get("group", ""))
 
     # 在初始化时检查会共同影响容量清理的两个参数。
     max_capacity = get_int_config(

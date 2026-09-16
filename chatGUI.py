@@ -28,7 +28,9 @@ from utils.web_search import (
     initialize_web_search
 )
 
-from utils.llm import get_llm, get_thinking_llm
+from utils.llm import get_llm, get_thinking_llm, get_vision_llm
+from utils.vision import split_image_description_with_reply
+from utils.prompt_container import VISION_PROMPT
 
 from utils.character_setting import (
     read_character_setting,
@@ -239,8 +241,8 @@ class CharacterChatEngine:
             characters_dir,
             self.character_name,
         )
-        self.true_character_name = self.character_config["true_character_name"]
-        self.scene_mode = self.character_config["scene_mode"]
+        self.true_character_name = self.character_config["character"]["true_character_name"]
+        self.scene_mode = self.character_config["character"]["scene_mode"]
         self.tool_call_content_allowlist = frozenset(
             get_string_list_config(
                 self.character_config,
@@ -338,6 +340,7 @@ class CharacterChatEngine:
             else:
                 print(f"[WebSearch] 网络搜索启用失败：{message}")
 
+        self.vision_llm_with_tools = None  # 有图片时才初始化，不影响纯文本角色启动。
         self.llm_with_tools = get_llm().bind_tools(
             list(self.tools_by_name.values())
         )
@@ -389,28 +392,52 @@ class CharacterChatEngine:
             )
             system_prompt += display_prompt
 
-        print(system_prompt)
-
         messages_for_llm = [SystemMessage(system_prompt), *state["messages"]]
+        vision_turn = config.get("configurable", {}).get("vision_turn")
+        # 图片只进入本次请求副本，不写入 messages/unsaved_messages 或检查点。
+        # pop 后同轮工具回环也不再发送图片；现有两次调用尝试可复用此副本。
+        image_urls = vision_turn.pop("images", []) if vision_turn is not None else []
+        if image_urls:
+            system_prompt += VISION_PROMPT.format()
+            messages_for_llm[0] = SystemMessage(system_prompt)
+            human = messages_for_llm[-1]
+            messages_for_llm[-1] = human.model_copy(update={"content": [
+                {"type": "text", "text": human.content},
+                *[{"type": "image_url", "image_url": {"url": url}} for url in image_urls],
+            ]})
+
+        print(system_prompt)
 
         # 因为一定会返回一条回复（即使大模型调用失败）
         # 所以再次直接将消息数量加一
         # updata_num_msg_per_turn_by_accumulation(state, 1)
 
         try:
+            model = self.llm_with_tools
+            if image_urls:
+                if self.vision_llm_with_tools is None:
+                    self.vision_llm_with_tools = get_vision_llm().bind_tools(list(self.tools_by_name.values()))
+                model = self.vision_llm_with_tools
             # 调用一次大模型失败后，再调用一次
             try:
-                response = self.llm_with_tools.invoke(messages_for_llm)
+                response = model.invoke(messages_for_llm)
                 
             except Exception as first_error:
                 print(f"\n[agent_node, 大模型调用出错]: {first_error}，正在重试...")
                 # 再调用一次
-                response = self.llm_with_tools.invoke(messages_for_llm)
+                response = model.invoke(messages_for_llm)
 
             display_name = getattr(
                 self, "true_character_name", self.character_name
             )
             response_text = self._message_content_text(response)
+            description, response_text = split_image_description_with_reply(response_text)
+            if vision_turn is not None and description and not vision_turn["description"]:
+                vision_turn["description"] = description
+                self._publish_history_event(
+                    "vision_description", description, config,
+                )
+                vision_turn["description_published"] = True
             if response_text:
                 print(f"{display_name}: {response_text}")
             has_tool_calls = bool(response.tool_calls)
@@ -455,6 +482,9 @@ class CharacterChatEngine:
             return {"messages": [response], "unsaved_messages": unsaved}
         except Exception as error:
             print(f"\n[agent_node, 大模型调用出错]: {error}")
+            if vision_turn is not None:
+                # 图片调用失败必须让前端恢复草稿，不能将道歉文本当作成功。
+                raise
             # 无标记文本会由 display.py 自动使用默认演出资源。
             error_message = "抱歉，我的大脑刚刚走神了，能再说一遍吗？"
             print(f"{self.character_name}: 抱歉，我的大脑刚刚走神了，能再说一遍吗？")
@@ -462,6 +492,11 @@ class CharacterChatEngine:
             self._publish_display_text(error_message, False, config)
             unsaved = [*state.get("unsaved_messages", []), message]
             return {"messages": [message], "unsaved_messages": unsaved}
+        finally:
+            # 成败均释放请求副本，后续只依赖 AI 回复中的文字描述。
+            image_urls.clear()
+            messages_for_llm.clear()
+
 
     def retrieve_node(
         self,

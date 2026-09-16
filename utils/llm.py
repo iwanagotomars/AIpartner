@@ -49,3 +49,14 @@ def get_translation_llm():
         max_retries=0,
         extra_body={"thinking": {"type": "disabled"}},
     )
+
+
+def get_vision_llm():
+    llm = ChatOpenAI(
+        model=os.getenv("LLM_VISION_MODEL_ID"),
+        api_key=os.getenv("LLM_VISION_API_KEY"),
+        base_url=os.getenv("LLM_VISION_BASE_URL"),
+        temperature=0.7,
+        extra_body={"thinking": {"type": "disabled"}}
+    )
+    return llm
