@@ -15,7 +15,7 @@ AIpartner 是一个通过网页 GUI 使用的本地 AI 聊天伙伴项目。你�
 
 从旧版本升级时：
 
-1. 建议先备份 `characters/`下所有的角色文件夹，再通过 `git pull` 或重新下载项目更新代码。
+1. 建议先备份 `characters/`下所有的角色文件，再通过 `git pull` 或重新下载项目更新代码。
 2. **必须使用新版本的 `characters/character_config.default.toml`**。
 3. 角色个人文件无需任何改动，角色自身旧格式的 `character_config.toml` 会在加载时自动迁移。
 4. 在 `aipartner` 环境中重新执行 `python -m pip install -r requirements.txt`，安装本次新增依赖。
