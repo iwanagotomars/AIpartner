@@ -19,7 +19,7 @@ AIpartner 是一个通过网页 GUI 使用的本地 AI 聊天伙伴项目。你�
 2. **必须使用新版本的 `characters/character_config.default.toml`**。
 3. 角色个人文件无需任何改动，角色自身旧格式的 `character_config.toml` 会在加载时自动迁移。
 4. 在 `aipartner` 环境中重新执行 `python -m pip install -r requirements.txt`，安装本次新增依赖。
-5. 如需图片识别，在 `.env` 中补充三项 `LLM_VISION_*` 配置；不配置仍可正常进行聊天。详见 [配置大模型 API](#配置大模型 API)。
+5. 如需图片识别，在 `.env` 中补充三项 `LLM_VISION_*` 配置；不配置仍可正常进行聊天。详见 [配置大模型 API](#配置大模型-api)。
 
 ## 效果展示
 
@@ -302,7 +302,7 @@ BAIDU_API_KEY=""
 
 ### 图片识别（可选）
 
-默认角色配置中的 `[vision]` 已设置 `vision = true`。同时填写 [配置大模型 API](#配置大模型 API) 三项视觉模型配置后，聊天输入框左侧会提供图片入口；如需为某个角色关闭该功能，可在该角色的 `character_config.toml` 中添加：
+默认角色配置中的 `[vision]` 已设置 `vision = true`。同时填写 [配置大模型 API](#配置大模型-api) 三项视觉模型配置后，聊天输入框左侧会提供图片入口；如需为某个角色关闭该功能，可在该角色的 `character_config.toml` 中添加：
 
 ```toml
 [vision]
